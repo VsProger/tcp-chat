@@ -53,6 +53,12 @@ func (h *ChatMessageHandler) handleCommand(client *core.Client, command string) 
 		} else {
 			h.listUsers(client)
 		}
+	case "/logout":
+		if client.ChatRoom == nil {
+			fmt.Fprintf(client.Conn, "You are not in a chat room.\n")
+		} else {
+			h.leaveChatRoom(client)
+		}
 	// case "/kick":
 	// 	if len(parts) < 2 {
 	// 		fmt.Fprintf(client.Conn, "Usage: /kick [username]\n")
@@ -191,7 +197,8 @@ func (h *ChatMessageHandler) joinChatRoom(client *core.Client, name string) {
 	client.ChatRoom = chatRoom
 	chatRoom.Lock.Unlock()
 
-	h.broadcast(chatRoom, client.Name, "has joined the chat room.")
+	h.broadcast(chatRoom, client.Name, "has joined the chat room.") // it sends message to the server instead to chat
+
 	fmt.Fprintf(client.Conn, "You joined chat room '%s'.\n", name)
 }
 
@@ -210,6 +217,7 @@ func (h *ChatMessageHandler) leaveChatRoom(client *core.Client) {
 			break
 		}
 	}
+	h.broadcast(client.ChatRoom, client.Name, "has joined the chat room.") // it sends message to the server instead to chat
 	client.ChatRoom = nil
 }
 
