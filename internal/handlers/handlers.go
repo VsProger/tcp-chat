@@ -5,13 +5,12 @@ import (
 	"strings"
 	"tcp-chat/internal/chat"
 	"tcp-chat/internal/core"
-	"tcp-chat/internal/encryption"
+
+	// "tcp-chat/internal/encryption"
 	"time"
 )
 
 type ChatMessageHandler struct{}
-
-var encryptionKey = []byte("aes256key-32characterslongpasswo")
 
 func (h *ChatMessageHandler) HandleMessage(client *core.Client, message string) {
 	if strings.HasPrefix(message, "/") {
@@ -57,7 +56,7 @@ func (h *ChatMessageHandler) handleCommand(client *core.Client, command string) 
 		if client.ChatRoom == nil {
 			fmt.Fprintf(client.Conn, "You are not in a chat room.\n")
 		} else {
-			h.leaveChatRoom(client)
+			h.logout(client)
 		}
 	// case "/kick":
 	// 	if len(parts) < 2 {
@@ -83,34 +82,37 @@ func (h *ChatMessageHandler) processChatMessage(client *core.Client, message str
 		fmt.Fprintf(client.Conn, "You are not currently in any chat room. Please join one to start chatting.\n")
 		return
 	}
-
-	encryptedMessage, err := encryption.Encrypt(encryptionKey, message)
-	if err != nil {
-		fmt.Fprintf(client.Conn, "Error encrypting message: %s\n", err)
-		fmt.Println("Error encrypting message:", err)
-		return
-	}
-
-	fmt.Println("Encrypted message:", encryptedMessage)
-	h.broadcast(client.ChatRoom, client.Name, encryptedMessage)
+	h.broadcast(client.ChatRoom, client.Name, message, "message")
 }
 
-func (h *ChatMessageHandler) broadcast(chatRoom *core.ChatRoom, username, encryptedMessage string) {
+func (h *ChatMessageHandler) broadcast(chatRoom *core.ChatRoom, username, message, key string) {
 	chatRoom.Lock.Lock()
 	defer chatRoom.Lock.Unlock()
 
-	currentTime := time.Now().Format("15:04")
-	formattedMessage := fmt.Sprintf("%s: [%s] %s\n", currentTime, username, encryptedMessage)
-	fmt.Println("Broadcasting encrypted message:", formattedMessage)
+	currentTime := time.Now().Format("2006-01-02 15:04:05")
+	formattedMessage := ""
+	switch key {
+	case "message":
+		formattedMessage = fmt.Sprintf("[%s][%s]:%s\n", currentTime, username, message)
+	case "ad":
+		formattedMessage = fmt.Sprintf("%s %s\n", username, message)
+	default:
+		formattedMessage = fmt.Sprintf("[%s][%s]:%s\n", currentTime, username, message)
+	}
+
+	fmt.Print(formattedMessage)
 
 	for _, client := range chatRoom.Clients {
-		decryptedMessage, err := encryption.Decrypt(encryptionKey, encryptedMessage)
-		if err != nil {
-			continue
+		finalMessage := ""
+		switch key {
+		case "message":
+			finalMessage = fmt.Sprintf("[%s][%s]:%s\n", currentTime, username, message)
+		case "ad":
+			finalMessage = fmt.Sprintf("%s %s\n", username, message)
+		default:
+			finalMessage = fmt.Sprintf("[%s][%s]:%s\n", currentTime, username, message)
 		}
 
-		fmt.Println("Decrypted message:", decryptedMessage)
-		finalMessage := fmt.Sprintf("%s: [%s] %s\n", currentTime, username, decryptedMessage)
 		if _, err := client.Conn.Write([]byte(finalMessage)); err != nil {
 			fmt.Println("Error writing to client:", err)
 		}
@@ -124,39 +126,46 @@ Available commands:
 /create [room_name] - Creates a new chat room.
 /join [room_name] - Joins an existing chat room.
 /users - Shows a list of users(only available in chat)
+/logout - Exits the chat room(only available in chat)
 `
 	fmt.Fprintf(client.Conn, helpText)
 }
 
-// func (h *ChatMessageHandler) logout(client *core.Client) {
-// 	client.ChatRoom = nil
-// 	fmt.Fprintf(client.Conn, "You logout from the room.\n")
-// 	fmt.Fprintf(client.Conn, "%s has left our chat...\n", username)
+func (h *ChatMessageHandler) logout(client *core.Client) {
+	// Check if client is already not in a room
+	if client.ChatRoom == nil {
+		fmt.Fprintf(client.Conn, "You are not currently in a chat room.\n")
+		return
+	}
+	chr := client.ChatRoom
+	// Safe broadcast with room nil check
+	h.broadcast(client.ChatRoom, client.Name, "has left the chat...", "ad")
 
-// 	normalizedUsername := strings.ToLower(client.Name)
+	normalizedUsername := strings.ToLower(client.Name)
 
-// 	found := false
+	client.ChatRoom.Lock.Lock()
+	defer client.ChatRoom.Lock.Unlock()
 
-// 	client.ChatRoom.Lock.Lock()
-// 	newClients := []*core.Client{}
-// 	for _, c := range client.ChatRoom.Clients {
-// 		if strings.ToLower(c.Name) == normalizedUsername {
-// 			fmt.Fprintf(c.Conn, "You have been kicked from the room.\n")
-// 			c.ChatRoom = nil
-// 			client.ChatRoom.KickedUsers[normalizedUsername] = true
-// 			found = true
-// 		} else {
-// 			newClients = append(newClients, c)
-// 		}
-// 	}
-// 	client.ChatRoom.Clients = newClients
-// 	client.ChatRoom.Lock.Unlock()
+	// Safeguard against nil pointer dereference
+	if client.ChatRoom == nil {
+		return
+	}
 
-// 	if found {
-// 		h.broadcast(client.ChatRoom, "Server", fmt.Sprintf("%s has been kicked from the room.", username))
-// 		fmt.Fprintf(client.Conn, "%s has been kicked from the room.\n", username)
-// 	}
-// }
+	newClients := []*core.Client{}
+	for _, c := range client.ChatRoom.Clients {
+		if strings.ToLower(c.Name) == normalizedUsername {
+			c.ChatRoom = nil
+		} else {
+			newClients = append(newClients, c)
+		}
+	}
+	chr.Clients = newClients
+
+	// Check again before broadcasting to avoid nil reference
+	if client.ChatRoom != nil {
+		h.broadcast(client.ChatRoom, "Server", fmt.Sprintf("%s has left the room.", client.Name), "ad")
+	}
+}
 
 func (h *ChatMessageHandler) createChatRoom(client *core.Client, name string) {
 	chat.ChatRoomsLock.Lock()
@@ -168,7 +177,7 @@ func (h *ChatMessageHandler) createChatRoom(client *core.Client, name string) {
 	}
 
 	chat.ChatRooms[name] = core.NewChatRoom(name, client)
-	fmt.Fprintf(client.Conn, "Chat room '%s' created. You can join now using '/join %s'.\n", name, name)
+	fmt.Fprintf(client.Conn, "Chat room '%s' created\n", name)
 }
 
 func (h *ChatMessageHandler) joinChatRoom(client *core.Client, name string) {
@@ -180,11 +189,11 @@ func (h *ChatMessageHandler) joinChatRoom(client *core.Client, name string) {
 		return
 	}
 
-	if chatRoom.KickedUsers[strings.ToLower(client.Name)] {
-		fmt.Fprintf(client.Conn, "You have been kicked from this chat room and cannot join.\n")
-		chat.ChatRoomsLock.Unlock()
-		return
-	}
+	// if chatRoom.KickedUsers[strings.ToLower(client.Name)] {
+	// 	fmt.Fprintf(client.Conn, "You have been kicked from this chat room and cannot join.\n")
+	// 	chat.ChatRoomsLock.Unlock()
+	// 	return
+	// }
 
 	chat.ChatRoomsLock.Unlock()
 
@@ -197,9 +206,8 @@ func (h *ChatMessageHandler) joinChatRoom(client *core.Client, name string) {
 	client.ChatRoom = chatRoom
 	chatRoom.Lock.Unlock()
 
-	h.broadcast(chatRoom, client.Name, "has joined the chat room.") // it sends message to the server instead to chat
-
-	fmt.Fprintf(client.Conn, "You joined chat room '%s'.\n", name)
+	h.broadcast(chatRoom, client.Name, "has joined the chat...", "ad")
+	// fmt.Fprintf(client.Conn, "You joined chat room '%s'.\n", name)
 }
 
 func (h *ChatMessageHandler) leaveChatRoom(client *core.Client) {
@@ -217,7 +225,7 @@ func (h *ChatMessageHandler) leaveChatRoom(client *core.Client) {
 			break
 		}
 	}
-	h.broadcast(client.ChatRoom, client.Name, "has joined the chat room.") // it sends message to the server instead to chat
+	h.broadcast(client.ChatRoom, client.Name, "has left the chat room.", "ad") // it sends message to the server instead to chat
 	client.ChatRoom = nil
 }
 
